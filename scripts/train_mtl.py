@@ -23,6 +23,7 @@ from core.utils.logger import setup_logger
 from core.utils.lr_scheduler import WarmupPolyLR
 from core.utils.score import SegmentationMetric
 
+import numpy as np
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Semantic Segmentation Training With Pytorch')
@@ -80,7 +81,7 @@ def parse_args():
     # checkpoint and log
     parser.add_argument('--resume', type=str, default=None,
                         help='put the path to resuming file if needed')
-    parser.add_argument('--save-dir', default='~/.torch/models',
+    parser.add_argument('--save-dir', default='/scratch/mariamma/pascal_voc/models',
                         help='Directory for saving checkpoint models')
     parser.add_argument('--save-epoch', type=int, default=10,
                         help='save model every checkpoint-epoch')
@@ -166,7 +167,7 @@ class Trainer(object):
                 self.model.load_state_dict(torch.load(args.resume, map_location=lambda storage, loc: storage))
 
         # create criterion
-        self.criterion = get_segmentation_loss(args.model, use_ohem=args.use_ohem, aux=args.aux,
+        self.criterion = get_segmentation_loss(args.model, nclass=21, use_ohem=args.use_ohem, aux=args.aux,
                                                aux_weight=args.aux_weight, ignore_index=-1).to(self.device)
 
         # optimizer, for model just includes pretrained, head and auxlayer
@@ -207,22 +208,24 @@ class Trainer(object):
         logger.info('Start training, Total Epochs: {:d} = Total Iterations {:d}'.format(epochs, max_iters))
 
         self.model.train()
+        
         for iteration, (images, targets, _) in enumerate(self.train_loader):
             iteration = iteration + 1
             self.lr_scheduler.step()
-
+            
             images = images.to(self.device)
             targets = targets.to(self.device)
-
-            outputs = self.model(images)
-            loss_dict = self.criterion(outputs, targets)
-
-            losses =  sum(loss for loss in loss_dict.values())
             
+            outputs = self.model(images)
+            
+            loss_dict = self.criterion(outputs, targets)
+            # print("Loss dict : ", loss_dict['loss'].shape)
+            # losses = sum(loss for loss in loss_dict.values())/len(loss_dict.values())
+            losses = loss_dict.mean() #sum(loss for loss in loss_dict)/len(loss_dict)
 
             # reduce losses over all GPUs for logging purposes
-            loss_dict_reduced = reduce_loss_dict(loss_dict)
-            losses_reduced = sum(loss for loss in loss_dict_reduced.values())
+            # loss_dict_reduced = reduce_loss_dict(loss_dict)
+            # losses_reduced = sum(loss for loss in loss_dict_reduced.values())
 
             self.optimizer.zero_grad()
             losses.backward()
@@ -284,14 +287,14 @@ def save_checkpoint(model, args, is_best=False):
     directory = os.path.expanduser(args.save_dir)
     if not os.path.exists(directory):
         os.makedirs(directory)
-    filename = '{}_{}_{}.pth'.format(args.model, args.backbone, args.dataset)
+    filename = '{}_{}_{}_mean.pth'.format(args.model, args.backbone, args.dataset)
     filename = os.path.join(directory, filename)
 
     if args.distributed:
         model = model.module
     torch.save(model.state_dict(), filename)
     if is_best:
-        best_filename = '{}_{}_{}_best_model.pth'.format(args.model, args.backbone, args.dataset)
+        best_filename = '{}_{}_{}_best_model_mean.pth'.format(args.model, args.backbone, args.dataset)
         best_filename = os.path.join(directory, best_filename)
         shutil.copyfile(filename, best_filename)
 

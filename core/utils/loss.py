@@ -5,13 +5,124 @@ import torch.nn.functional as F
 
 from torch.autograd import Variable
 
-__all__ = ['MixSoftmaxCrossEntropyLoss', 'MixSoftmaxCrossEntropyOHEMLoss',
+import numpy as np
+from torchvision.utils import save_image
+
+
+__all__ = ['MixSoftmaxCustomLoss', 'MixSoftmaxCrossEntropyLoss', 'MixSoftmaxCrossEntropyOHEMLoss',
            'EncNetLoss', 'ICNetLoss', 'get_segmentation_loss']
+
+
+class MixSoftmaxCustomLoss2(nn.BCEWithLogitsLoss):
+    def __init__(self, nclass=21, batch_size=4, aux=True, aux_weight=0.2, ignore_index=-1, **kwargs):
+        # super(MixSoftmaxCrossEntropyLoss, self).__init__(ignore_index=ignore_index)
+        super(MixSoftmaxCustomLoss2, self).__init__(reduction='none')
+        self.aux = aux
+        self.aux_weight = aux_weight
+        self.nclass = nclass
+        self.batch_size = batch_size
+
+    def _aux_forward(self, *inputs, **kwargs):
+        *preds, target = tuple(inputs)
+
+        loss = super(MixSoftmaxCustomLoss2, self).forward(preds[0], target)
+        print("Loss : ", loss)
+        for i in range(1, len(preds)):
+            aux_loss = super(MixSoftmaxCustomLoss2, self).forward(preds[i], target)
+            loss += self.aux_weight * aux_loss
+        return loss
+
+    def forward(self, *inputs, **kwargs):
+        preds, target = tuple(inputs)
+        inputs = tuple(list(preds) + [target])
+
+        loss_dict = {}
+        
+        loss_list = []
+        for b in range(self.batch_size):
+            batch_target = []
+            for i in range(0, self.nclass):
+                cur_target = torch.full(target[b].shape, i).cuda()
+                mask = (target[b]==cur_target).int()
+                batch_target.append(mask)
+            batch_tensor = torch.stack(batch_target, 0)    
+            loss_list.append(batch_tensor)
+        loss_target = torch.stack(loss_list, 0)    
+        # pred = torch.softmax(preds[0], dim=1)
+        pred = preds[0]
+        loss_dict = super(MixSoftmaxCustomLoss2, self).forward(pred, loss_target.float())
+        loss_dict = torch.mean(loss_dict, dim=[2,3])
+        loss_dict = torch.mean(loss_dict, dim=0)
+        return loss_dict    
+
+
+class MixSoftmaxCustomLoss(nn.CrossEntropyLoss):
+    def __init__(self, nclass=21, aux=True, aux_weight=0.2, ignore_index=-1, **kwargs):
+        # super(MixSoftmaxCrossEntropyLoss, self).__init__(ignore_index=ignore_index)
+        super(MixSoftmaxCustomLoss, self).__init__()
+        self.aux = aux
+        self.aux_weight = aux_weight
+        self.nclass = nclass
+
+    def _aux_forward(self, *inputs, **kwargs):
+        *preds, target = tuple(inputs)
+
+        loss = super(MixSoftmaxCustomLoss, self).forward(preds[0], target)
+        print("Loss : ", loss)
+        for i in range(1, len(preds)):
+            aux_loss = super(MixSoftmaxCustomLoss, self).forward(preds[i], target)
+            loss += self.aux_weight * aux_loss
+        return loss
+
+    def forward(self, *inputs, **kwargs):
+        preds, target = tuple(inputs)
+        inputs = tuple(list(preds) + [target])
+
+        loss_dict = {}
+        
+        for i in range(0, self.nclass):
+            cur_target = torch.full(target.shape, i).cuda()
+            mask = (target==cur_target).int()
+            # mask = mask*i
+            pred = torch.sigmoid(preds[0])
+            pred_class = torch.stack((pred[0][i], pred[1][i], pred[2][i], pred[3][i]))
+            loss_dict[i] = super(MixSoftmaxCustomLoss, self).forward(pred_class, mask.float())
+        
+        return loss_dict    
+
+
+
+class MixSoftmaxBCELoss(nn.BCELoss):
+    def __init__(self, aux=True, aux_weight=0.2, ignore_index=-1, **kwargs):
+        super(MixSoftmaxBCELoss, self).__init__()
+        self.aux = aux
+        self.aux_weight = aux_weight
+
+    def _aux_forward(self, *inputs, **kwargs):
+        *preds, target = tuple(inputs)
+
+        loss = super(MixSoftmaxBCELoss, self).forward(preds[0], target)
+        for i in range(1, len(preds)):
+            aux_loss = super(MixSoftmaxBCELoss, self).forward(preds[i], target)
+            loss += self.aux_weight * aux_loss
+        return loss
+
+    def forward(self, *inputs, **kwargs):
+        preds, target = tuple(inputs)
+        print(preds)
+        inputs = tuple(list(preds) + [target])
+        if self.aux:
+            return dict(loss=self._aux_forward(*inputs))
+        else:
+            return dict(loss=super(MixSoftmaxBCELoss, self).forward(*inputs))  
+
+
 
 
 # TODO: optim function
 class MixSoftmaxCrossEntropyLoss(nn.CrossEntropyLoss):
     def __init__(self, aux=True, aux_weight=0.2, ignore_index=-1, **kwargs):
+        # super(MixSoftmaxCrossEntropyLoss, self).__init__(ignore_index=ignore_index, reduction='none')
         super(MixSoftmaxCrossEntropyLoss, self).__init__(ignore_index=ignore_index)
         self.aux = aux
         self.aux_weight = aux_weight
@@ -31,7 +142,7 @@ class MixSoftmaxCrossEntropyLoss(nn.CrossEntropyLoss):
         if self.aux:
             return dict(loss=self._aux_forward(*inputs))
         else:
-            return dict(loss=super(MixSoftmaxCrossEntropyLoss, self).forward(*inputs))
+            return dict(loss=super(MixSoftmaxCrossEntropyLoss, self).forward(*inputs))  
 
 
 # reference: https://github.com/zhanghang1989/PyTorch-Encoding/blob/master/encoding/nn/loss.py
@@ -192,4 +303,6 @@ def get_segmentation_loss(model, use_ohem=False, **kwargs):
     elif model == 'icnet':
         return ICNetLoss(**kwargs)
     else:
-        return MixSoftmaxCrossEntropyLoss(**kwargs)
+        # return MixSoftmaxBCELoss(**kwargs)
+        return MixSoftmaxCustomLoss2(**kwargs)
+        # return MixSoftmaxCrossEntropyLoss(**kwargs)

@@ -21,9 +21,31 @@ from core.utils.logger import setup_logger
 from core.utils.distributed import synchronize, get_rank, make_data_sampler, make_batch_data_sampler
 
 from train import parse_args
-import cv2
-import numpy as np
-from PIL import Image
+import math
+
+# FGSM attack code
+def fgsm_attack(image, epsilon, data_grad):
+    # Collect the element-wise sign of the data gradient
+    sign_data_grad = data_grad.sign()
+    # Create the perturbed image by adjusting each pixel of the input image
+    perturbed_image = image + epsilon*sign_data_grad
+    # Adding clipping to maintain [0,1] range
+    perturbed_image = torch.clamp(perturbed_image, 0, 1)
+    # Return the perturbed image
+    return perturbed_image
+
+
+def get_loss_diff(output_orig, output_perturbed):
+    # print("Origin : ", output_orig)
+    # print("Perturbed : ", output_perturbed)
+    sum = 0
+    for i in range(10):
+        # print("{} origin={}, perturbed={}".format(i, output_orig.cpu().data.numpy()[0][i], output_perturbed.cpu().data.numpy()[0][i]))
+        l = output_orig.cpu().data.numpy()[0][i] - output_perturbed.cpu().data.numpy()[0][i]
+        sum += l*l
+    sum = sum/10    
+    return  math.sqrt(sum)   
+
 
 
 class Evaluator(object):
@@ -49,7 +71,6 @@ class Evaluator(object):
         # create network
         BatchNorm2d = nn.SyncBatchNorm if args.distributed else nn.BatchNorm2d
         self.model = get_segmentation_model(model=args.model, dataset=args.dataset, backbone=args.backbone,
-                                            root='/scratch/mariamma/pascal_voc/models/minmax/max',
                                             aux=args.aux, pretrained=True, pretrained_base=False,
                                             local_rank=args.local_rank,
                                             norm_layer=BatchNorm2d).to(self.device)
@@ -72,8 +93,9 @@ class Evaluator(object):
             image = image.to(self.device)
             target = target.to(self.device)
 
-            with torch.no_grad():
-                outputs = model(image)
+            image.requires_grad = True
+            
+            outputs = model(image)
             self.metric.update(outputs[0], target)
             pixAcc, mIoU = self.metric.get()
             logger.info("Sample: {:d}, validation pixAcc: {:.3f}, mIoU: {:.3f}".format(
@@ -85,20 +107,33 @@ class Evaluator(object):
 
                 predict = pred.squeeze(0)
                 mask = get_color_pallete(predict, self.args.dataset)
-                alpha = 0.5
-                
-                image_final = cv2.imread(os.path.join("/scratch/mariamma/pascal_voc/VOCdevkit/VOC2012/JPEGImages", filename[0]))
-                mask_rgb = mask.convert(mode='RGB')
-                # mask_rgb_np = np.array(mask_rgb, dtype='f')
-                # mask_final = np.moveaxis(mask_rgb_np, -1, 0)
-                # image_final = image.cpu().detach().numpy()[0] * 255
-                # print(image.cpu().detach().numpy()[0])
-                # print(mask_final)
-                # print("Image : ", image_final.shape, " Mask : ", mask.shape)
-                image_combined = cv2.addWeighted(image_final, 1 - alpha, np.asarray(mask_rgb), alpha, 0)
-                image_combined = Image.fromarray(image_combined)
-                image_combined.save(os.path.join(outdir, os.path.splitext(filename[0])[0] + '.png'))
-                # mask.save(os.path.join(outdir, os.path.splitext(filename[0])[0] + '.png'))
+                mask.save(os.path.join(outdir, os.path.splitext(filename[0])[0] + '.png'))
+
+            total_loss = multilabel_criterion(output, target)
+            loss = torch.mean(total_loss)
+            # Zero all existing gradients
+            model.zero_grad()
+            # Calculate gradients of model in backward pass
+            loss.backward()
+            # Collect datagrad
+            data_grad = data.grad.data
+            # Call FGSM Attack
+            perturbed_data = fgsm_attack(data, epsilon, data_grad)
+            # Re-classify the perturbed image
+            output_perturbed = model(perturbed_data)    
+            self.metric.update(outputs[0], target)
+            pixAcc, mIoU = self.metric.get()
+            logger.info("Sample: {:d}, validation pixAcc: {:.3f}, mIoU: {:.3f}".format(
+                i + 1, pixAcc * 100, mIoU * 100))
+            if self.args.save_pred:
+                pred = torch.argmax(outputs[0], 1)
+                pred = pred.cpu().data.numpy()
+
+                predict = pred.squeeze(0)
+                mask = get_color_pallete(predict, self.args.dataset)
+                mask.save(os.path.join(outdir, os.path.splitext(filename[0])[0] + '.png'))
+            loss_diff = get_loss_diff(outputs, output_perturbed)
+
         synchronize()
 
 
@@ -120,7 +155,7 @@ if __name__ == '__main__':
     # TODO: optim code
     args.save_pred = True
     if args.save_pred:
-        outdir = '/scratch/mariamma/pascal_voc/models/minmax/max/runs/pred_pic/{}_{}_{}'.format(args.model, args.backbone, args.dataset)
+        outdir = '../runs/pred_pic/{}_{}_{}'.format(args.model, args.backbone, args.dataset)
         if not os.path.exists(outdir):
             os.makedirs(outdir)
 

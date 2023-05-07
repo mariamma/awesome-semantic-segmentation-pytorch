@@ -101,7 +101,7 @@ class _PSPHead(nn.Module):
         return self.block(x)
 
 
-def get_psp(dataset='pascal_voc', backbone='resnet50', pretrained=False, root='~/.torch/models',
+def get_psp(dataset='pascal_voc', backbone='resnet50', pretrained=False, root='/scratch/mariamma/pascal_voc/models/ce',
             pretrained_base=True, **kwargs):
     r"""Pyramid Scene Parsing Network
 

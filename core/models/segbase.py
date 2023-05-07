@@ -3,9 +3,28 @@ import torch.nn as nn
 
 from ..nn import JPU
 from .base_models.resnetv1b import resnet50_v1s, resnet101_v1s, resnet152_v1s
+from .base_models.resnet import resnet50, resnet101
+
+import torch
 
 __all__ = ['SegBaseModel']
 
+class ObjectDetection(nn.Module):
+    def __init__(self):
+        super(ObjectDetection,self).__init__()
+        self.transition_layer = nn.Conv2d(2048, 2048, kernel_size=3, padding=1, stride=1, bias=False)
+        self.gap = nn.AvgPool2d(16, 16)
+        # self.prediction_layer = nn.Sequential(nn.Linear(2048, 15), nn.Sigmoid())
+        self.prediction_layer = nn.Sequential(nn.Linear(2048, 15))
+        self.sigmoid_layer = nn.Sigmoid()
+
+    def forward(self,x):
+        x = self.transition_layer(x)
+        x = self.gap(x)
+        x = torch.squeeze(x)
+        out1 = self.prediction_layer(x)
+        out2 = self.sigmoid_layer(out1)
+        return out1, out2
 
 class SegBaseModel(nn.Module):
     r"""Base Model for Semantic Segmentation
@@ -22,8 +41,13 @@ class SegBaseModel(nn.Module):
         dilated = False if jpu else True
         self.aux = aux
         self.nclass = nclass
+        self.objectDetection = ObjectDetection()
         if backbone == 'resnet50':
-            self.pretrained = resnet50_v1s(pretrained=pretrained_base, dilated=dilated, **kwargs)
+            
+            if 'local_rank' in kwargs:
+                kwargs.pop('local_rank', None)
+            # self.pretrained = resnet50_v1s(pretrained=pretrained_base, dilated=dilated, **kwargs)
+            self.pretrained =  resnet50(pretrained=pretrained_base, **kwargs) 
         elif backbone == 'resnet101':
             self.pretrained = resnet101_v1s(pretrained=pretrained_base, dilated=dilated, **kwargs)
         elif backbone == 'resnet152':
